@@ -1,0 +1,309 @@
+# Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+
+name: Temporary FreeBSD Ports source proof
+
+on:
+  push:
+    branches: [proof/freebsd-fixes]
+    paths: [.github/workflows/freebsd-ports-source-proof.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temporary-freebsd-ports-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Prepare source and build native addons
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: x86_64
+          mem: 6144
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+            pkg install -y node24 npm-node24 python3 gmake cmake jq ca_root_nss
+          run: |
+            set -eu
+            freebsd-version
+            node --version
+            npm --version
+            df -h . /tmp
+            sysctl hw.physmem
+            driver=$(mktemp /tmp/freebsd-ports-source-driver.XXXXXX)
+            trap 'rm -f "$driver"' EXIT
+            trap 'exit 1' HUP INT TERM
+            cat > "$driver" <<'DRIVER'
+            #!/bin/sh
+            # Disposable FreeBSD source preparation; no package install or service activation.
+            set -eu
+            [ "$(uname -s)" = FreeBSD ]
+            [ "$(id -u)" = 0 ]
+            output=${1:?absolute new export directory required}
+            case "$output" in /*) ;; *) exit 1 ;; esac
+            [ ! -e "$output" ]
+            for command in node npm python3 gmake cmake jq fetch mdconfig newfs mount umount timeout; do
+              command -v "$command" >/dev/null
+            done
+            node -e 'const [a,b]=process.versions.node.split(".").map(Number); if(a!==24||b<16) process.exit(1)'
+            work=$(mktemp -d /tmp/openclaw-ports-source.XXXXXX)
+            device=
+            mounted=no
+            owned_device() {
+              [ "$(mdconfig -l -f "$work/scratch.img")" = "$device" ]
+            }
+            owned_mount() {
+              mount -p | awk -v source="/dev/$device" -v target="$work/scratch" \
+                '$1 == source && $2 == target && $3 == "ufs" { found++ } END { exit(found != 1) }'
+            }
+            cleanup() {
+              result=$?
+              trap - EXIT HUP INT TERM
+              if [ -n "$device" ] && ! owned_device; then
+                echo "cleanup ownership mismatch; retained $work" >&2
+                exit 1
+              fi
+              if [ "$mounted" = yes ]; then
+                if ! owned_mount; then
+                  echo "cleanup mount ownership mismatch; retained $work" >&2
+                  exit 1
+                fi
+                if ! umount "$work/scratch"; then
+                  echo "cleanup failed; retained owned mount $work/scratch" >&2
+                  exit 1
+                fi
+              fi
+              if [ -n "$device" ]; then
+                if ! mdconfig -d -u "$device"; then
+                  echo "cleanup failed; retained owned device $device" >&2
+                  exit 1
+                fi
+              fi
+              rm -rf "$work"
+              exit "$result"
+            }
+            trap cleanup EXIT
+            trap 'exit 1' HUP INT TERM
+            available_kib=$(df -k "$work" | awk 'NR == 2 { print $4 }')
+            [ "$available_kib" -ge 7340032 ]
+            [ "$(sysctl -n hw.physmem)" -ge 4294967296 ]
+            # A dedicated filesystem enforces the scratch limit across npm and native builds.
+            truncate -s 6G "$work/scratch.img"
+            device=$(mdconfig -a -t vnode -f "$work/scratch.img")
+            case "$device" in md[0-9]*) ;; *) echo 'invalid owned md device' >&2; exit 1 ;; esac
+            case "${device#md}" in ''|*[!0-9]*) exit 1 ;; esac
+            owned_device
+            newfs -U "/dev/$device" >/dev/null
+            mkdir "$work/scratch"
+            mount "/dev/$device" "$work/scratch"
+            mounted=yes
+            owned_mount
+            mkdir "$work/scratch/home" "$work/scratch/tmp" "$work/scratch/export"
+            export HOME="$work/scratch/home" TMPDIR="$work/scratch/tmp"
+            export npm_config_userconfig=/dev/null npm_config_globalconfig=/dev/null
+            export npm_config_cache="$work/scratch/npm-cache"
+            export npm_config_force=true npm_config_audit=false npm_config_fund=false
+            export LOCALBASE=/usr/local PYTHON=/usr/local/bin/python3
+            export CMAKE_BUILD_PARALLEL_LEVEL=2 MAKEFLAGS=-j2
+            timeout 60 fetch -q -o "$work/helper.sh" \
+              https://raw.githubusercontent.com/freebsd/freebsd-ports/2cb2680d95459f1a2d484151ef8c70d37460f15c/Tools/scripts/npmjs-fetch-with-dependencies.sh
+            [ "$(sha256 -q "$work/helper.sh")" = 1a7b0b2cb656a2ea80b49f68e0a4b5e39f519a72065ba5206c8b706c072c21a4 ]
+            cat > "$work/prepare.sh" <<'SH'
+            #!/bin/sh
+            set -eu
+            work=$1
+            root="$work/scratch"
+            archive="$root/openclaw-2026.9.4.tar.gz"
+            lock="$root/export/package-lock.json"
+            # Use the unchanged Ports fetch contract, including its nested dependency layout.
+            /bin/sh "$work/helper.sh" openclaw 2026.9.4 "$lock" "$archive"
+            node - "$lock" <<'JS'
+            const fs = require('node:fs');
+            const assert = require('node:assert/strict');
+            const lock = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+            const root = 'node_modules/openclaw';
+            const pkg = lock.packages[root];
+            assert.equal(pkg.version, '2026.9.4');
+            assert.equal(pkg.resolved, 'https://registry.npmjs.org/openclaw/-/openclaw-2026.9.4.tgz');
+            assert.equal(pkg.integrity, 'sha512-lTQpEEe1Xm3u2PCHaPEr+vP8paGk1vLdHuzdItsNToaLI6hAqRVvgJYg+GxukJhETJp4tPy/S1Gftl4KuB8n7A==');
+            for (const [name, item] of Object.entries(lock.packages)) {
+              assert.ok(name === '' || name === root || name.startsWith(root + '/node_modules/'), `outside private subtree: ${name}`);
+              if (name) {
+                assert.ok(item.resolved?.startsWith('https://registry.npmjs.org/'), `non-registry dependency: ${name}`);
+                assert.ok(item.integrity?.startsWith('sha512-'), `missing integrity: ${name}`);
+              }
+            }
+            assert.equal(lock.packages[root + '/node_modules/koffi'].version, '3.1.6');
+            assert.equal(lock.packages[root + '/node_modules/koffi'].integrity, 'sha512-ln60chEb3o7Du1ayjwl6BFiNN1wZK+3cTM2wWGiHLEzCY/FdTIN1ER5VWDwHq7J/j4tSnnrHaH5ABS1EO6+6ag==');
+            assert.equal(lock.packages[root + '/node_modules/tree-sitter-bash'].version, '0.25.1');
+            assert.equal(lock.packages[root + '/node_modules/tree-sitter-bash'].integrity, 'sha512-7hMytuYIMoXOq24yRulgIxthE9YmggZIOHCyPTTuJcu6EU54tYD+4G39cUb28kxC6jMf/AbPfWGLQtgPTdh3xw==');
+            console.log('PASS pinned release and self-contained Ports dependency lock');
+            JS
+            # The helper's lock-generation branch saves a different package.json dependency
+            # spec. Distinfo must describe its committed-lock branch, which Ports will use.
+            rm "$archive"
+            /bin/sh "$work/helper.sh" openclaw 2026.9.4 "$lock" "$archive"
+            archive_hash=$(sha256 -q "$archive")
+            rm "$archive"
+            /bin/sh "$work/helper.sh" openclaw 2026.9.4 "$lock" "$archive"
+            [ "$(sha256 -q "$archive")" = "$archive_hash" ]
+            echo 'PASS reproducible source archive from the committed-lock fetch path'
+            {
+              printf 'TIMESTAMP = %s\n' "$(date +%s)"
+              printf 'SHA256 (openclaw/openclaw-2026.9.4.tar.gz) = %s\n' "$(sha256 -q "$archive")"
+              printf 'SIZE (openclaw/openclaw-2026.9.4.tar.gz) = %s\n' "$(stat -f %z "$archive")"
+            } > "$root/export/distinfo"
+            tar -xzf "$archive" -C "$root"
+            runtime="$root/openclaw-2026.9.4/node_modules/openclaw"
+            [ -f "$runtime/openclaw.mjs" ]
+            node - "$runtime" "$root/export/native-inventory.json" <<'JS'
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const root = process.argv[2];
+            const inventory = {node: process.version, platform: process.platform, arch: process.arch, installScripts: [], suppliedAddons: []};
+            function walk(rel) {
+              for (const item of fs.readdirSync(path.join(root, rel), {withFileTypes: true})) {
+                const name = path.join(rel, item.name);
+                if (item.isDirectory()) walk(name);
+                else if (item.isFile() && name.endsWith('.node')) inventory.suppliedAddons.push(name);
+                else if (item.isFile() && item.name === 'package.json') {
+                  let pkg;
+                  try { pkg = JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')); } catch { continue; }
+                  const scripts = Object.fromEntries(Object.entries(pkg.scripts ?? {}).filter(([key]) => ['preinstall', 'install', 'postinstall'].includes(key)));
+                  if (Object.keys(scripts).length) inventory.installScripts.push({path: name, name: pkg.name, version: pkg.version, scripts});
+                }
+              }
+            }
+            walk('');
+            fs.writeFileSync(process.argv[3], JSON.stringify(inventory, null, 2) + '\n');
+            console.log(JSON.stringify(inventory, null, 2));
+            JS
+            # Force source compilation: prebuilt artifacts must not satisfy either addon probe.
+            find "$runtime" -type f -name '*.node' -delete
+            cd "$runtime/node_modules/koffi"
+            node cnoke.cjs -P . -D src/koffi --release
+            cd "$runtime/node_modules/tree-sitter-bash"
+            node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js \
+              configure build --nodedir=/usr/local
+            arch=$(node -p process.arch)
+            # node-gyp-build recognizes the standard platform-architecture prebuild directory.
+            mkdir -p "prebuilds/freebsd-$arch"
+            mv build/Release/tree_sitter_bash_binding.node "prebuilds/freebsd-$arch/tree-sitter-bash.node"
+            # Exercise the same native cleanup currently used by the Ports staging recipe.
+            find "$runtime" -type f -name '*.node' ! -path '*freebsd*' -delete
+            node - "$runtime" "$root/export/native-inventory.json" <<'JS'
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const assert = require('node:assert/strict');
+            const {createRequire} = require('node:module');
+            const root = process.argv[2];
+            const req = createRequire(path.join(root, 'package.json'));
+            const koffi = req('koffi');
+            assert.equal(koffi.load(null).func('int getpid()')(), process.pid);
+            const bash = req('tree-sitter-bash');
+            assert.ok(bash.language);
+            const inventory = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+            inventory.loadedAddons = Object.keys(require.cache).filter(name => name.endsWith('.node')).map(name => path.relative(root, name));
+            assert.equal(inventory.loadedAddons.length, 2);
+            assert.ok(inventory.loadedAddons.every(name => name.includes('freebsd')));
+            inventory.sourceBuildAndLoad = 'passed';
+            fs.writeFileSync(process.argv[3], JSON.stringify(inventory, null, 2) + '\n');
+            console.log('PASS source-built koffi getpid and tree-sitter-bash load after native filtering');
+            JS
+            node "$runtime/openclaw.mjs" --version
+            SH
+            # Default FreeBSD timeout intentionally owns all build descendants here.
+            timeout -k 15 2700 /bin/sh "$work/prepare.sh" "$work"
+            size=$(du -sk "$work/scratch/export" | awk '{print $1}')
+            [ "$size" -lt 1024 ]
+            mkdir "$output"
+            for name in package-lock.json distinfo native-inventory.json; do
+              cp "$work/scratch/export/$name" "$output/$name"
+            done
+            echo 'PASS Ports source preparation and two native addon builds; package stage/install/upgrade still pending'
+            DRIVER
+            test "$(sha256 -q "$driver")" = 'f9949da5c9acf92e01905958cd8fe2a2f167f47ffed8ed522aeb8fcebf0b9ae8'
+            sh "$driver" /tmp/openclaw-ports-export
+      - name: Transfer only the three bounded proof files
+        shell: python
+        run: |
+          import base64
+          import hashlib
+          import json
+          import subprocess
+          from pathlib import Path
+          # The VM action leaves its task-owned `freebsd` SSH alias available.
+          remote = r"""
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const assert = require('node:assert/strict');
+          const root = process.argv[2];
+          const names = ['distinfo', 'native-inventory.json', 'package-lock.json'];
+          assert.ok(fs.lstatSync(root).isDirectory());
+          assert.deepEqual(fs.readdirSync(root).sort(), names);
+          const result = [];
+          let total = 0;
+          for (const name of names) {
+            const fd = fs.openSync(root + '/' + name, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+            try {
+              const stat = fs.fstatSync(fd);
+              assert.ok(stat.isFile());
+              total += stat.size;
+              assert.ok(total < 1024 * 1024);
+              const data = fs.readFileSync(fd);
+              assert.equal(data.length, stat.size);
+              result.push({name, size: data.length, sha256: crypto.createHash('sha256').update(data).digest('hex'), data: data.toString('base64')});
+            } finally { fs.closeSync(fd); }
+          }
+          process.stdout.write(JSON.stringify(result));
+          """
+          transfer = subprocess.run(
+              ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+               "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+               "freebsd", "/usr/local/bin/node", "-", "/tmp/openclaw-ports-export"],
+              input=remote.encode(), stdout=subprocess.PIPE, check=True, timeout=60)
+          assert len(transfer.stdout) < 1500000
+          items = json.loads(transfer.stdout)
+          expected = {"package-lock.json", "distinfo", "native-inventory.json"}
+          assert len(items) == 3 and {item["name"] for item in items} == expected
+          payloads = {}
+          for item in items:
+              payload = base64.b64decode(item["data"], validate=True)
+              assert len(payload) == item["size"]
+              assert hashlib.sha256(payload).hexdigest() == item["sha256"]
+              payloads[item["name"]] = payload
+          assert sum(map(len, payloads.values())) < 1024 * 1024
+          root = Path("freebsd-port-source-proof")
+          root.mkdir()
+          for name, payload in sorted(payloads.items()):
+              with (root / name).open("xb") as output:
+                  output.write(payload)
+              print(f"EXPORT {name} bytes={len(payload)} sha256={hashlib.sha256(payload).hexdigest()}")
+      - name: Retain only the package proof inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: freebsd-port-source-${{ github.run_id }}
+          path: |
+            freebsd-port-source-proof/package-lock.json
+            freebsd-port-source-proof/distinfo
+            freebsd-port-source-proof/native-inventory.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+          include-hidden-files: false
