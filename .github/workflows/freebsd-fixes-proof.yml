@@ -25,10 +25,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: vincentkoc/plugins-workspace
-          ref: ddfff742ce62d4b20dbe7b514f6fba77f5c998c7
+          ref: 53601831e57c07967f9045ca5112df0587bc8a14
           persist-credentials: false
       - name: Verify candidate source
-        run: test "$(git rev-parse HEAD)" = 'ddfff742ce62d4b20dbe7b514f6fba77f5c998c7'
+        run: test "$(git rev-parse HEAD)" = '53601831e57c07967f9045ca5112df0587bc8a14'
       - name: Test on native FreeBSD
         uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
         with:
@@ -47,13 +47,13 @@ jobs:
             pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 xdg-utils desktop-file-utils
           run: |
             set -eu
-            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = 'ddfff742ce62d4b20dbe7b514f6fba77f5c998c7'
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = '53601831e57c07967f9045ca5112df0587bc8a14'
             freebsd-version
             rustc --version
             cargo --version
             pkg-config --modversion gtk+-3.0 webkit2gtk-4.1
             sha256 -q Cargo.lock
-            echo 'COMPOSED source: corrected XDG fixtures; prior D-Bus proof retained'
-            cargo test --locked --package tauri-plugin-deep-link --all-targets
-            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_commands -- --ignored --exact xdg_command_results --nocapture
-            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_unregister -- --ignored --exact xdg_unregister --nocapture
+            command -v gio
+            gio version
+            cargo build --locked --package tauri-plugin-deep-link --example gio_launch
+            timeout -k 5s 90s target/debug/examples/gio_launch
