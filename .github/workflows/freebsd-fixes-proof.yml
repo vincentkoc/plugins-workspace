@@ -1,0 +1,64 @@
+# Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+
+name: Temporary FreeBSD fixes proof
+
+on:
+  push:
+    branches: [proof/freebsd-fixes]
+    paths: [.github/workflows/freebsd-fixes-proof.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temporary-freebsd-fixes-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  freebsd:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: tauri-plugin-updater
+            source: 0574ea4cdf3ad921cf0c6d61946af5a0cb8f9339
+            args: --lib --test bsd
+          - package: tauri-plugin-deep-link
+            source: 0302d0d2f721a74403fcbf350bbf107852371d8b
+            args: --all-targets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+      - name: Verify candidate source
+        run: test "$(git rev-parse HEAD)" = '${{ matrix.source }}'
+      - name: Test on native FreeBSD
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: x86_64
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 dbus
+          run: |
+            set -eu
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = '${{ matrix.source }}'
+            freebsd-version
+            rustc --version
+            cargo --version
+            pkg-config --modversion gtk+-3.0 webkit2gtk-4.1
+            cargo test --locked --package '${{ matrix.package }}' ${{ matrix.args }}
