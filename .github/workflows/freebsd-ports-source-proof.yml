@@ -66,7 +66,9 @@ jobs:
             device=
             mounted=no
             owned_device() {
-              [ "$(mdconfig -l -f "$work/scratch.img")" = "$device" ]
+              # Unit queries avoid the trailing separator emitted by list mode.
+              reported_device=$(mdconfig -l -u "$device" -f "$work/scratch.img") || return 1
+              [ "$reported_device" = "$device" ]
             }
             owned_mount() {
               mount -p | awk -v source="/dev/$device" -v target="$work/scratch" \
@@ -238,7 +240,7 @@ jobs:
             done
             echo 'PASS Ports source preparation and two native addon builds; package stage/install/upgrade still pending'
             DRIVER
-            test "$(sha256 -q "$driver")" = 'f9949da5c9acf92e01905958cd8fe2a2f167f47ffed8ed522aeb8fcebf0b9ae8'
+            test "$(sha256 -q "$driver")" = 'cf7fec404d7c82a630c294a9bb50152f84ef6d0ff0819890c0fd9d49fa43b43f'
             sh "$driver" /tmp/openclaw-ports-export
       - name: Transfer only the three bounded proof files
         shell: python
