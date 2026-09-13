@@ -134,7 +134,7 @@ jobs:
             work=$1
             root="$work/scratch"
             ports_sha=2cb2680d95459f1a2d484151ef8c70d37460f15c
-            candidate=78150fbeaef818c641bd84095db84eae9a0753e5
+            candidate=dff18300837e4336fae1ecd31cc6bb6b8f5f9148
             [ ! -e /usr/local/bin/openclaw ]
             [ ! -e /usr/local/etc/rc.d/openclaw ]
             pkg info -e 'node24>=24.16.0'
@@ -159,7 +159,7 @@ jobs:
                 "https://raw.githubusercontent.com/vincentkoc/freebsd-ports/$candidate/misc/openclaw/$name"
               [ "$(sha256 -q "$port/$name")" = "$digest" ]
             }
-            fetch_source Makefile 775b023e9e5b7fd47b1a47124eadac83b7508521a955f7c75f7408c639915bae
+            fetch_source Makefile fe0a860a400f9a3e99bb33202b1e97e16b82183a22e48b74dcc95debb55ecb08
             fetch_source distinfo 3a70d9700eddbc53451183c99dfee96a452c5c33964e342a83ae33a1eb97aed0
             fetch_source pkg-descr 5482288d3bca58670b2da1faf81b7ba58833c8c9e413d26da69049c4b0c31e9e
             fetch_source pkg-message 5ca521c636cfc717bddff290790d80454d0900fa406e97286465f493e2ebc49e
@@ -226,6 +226,9 @@ jobs:
             }
             const packagedAddons = files.filter(file => file.endsWith('.node')).map(file => file.replace(/^\/+/, '')).sort();
             assert.deepEqual(packagedAddons, loaded.map(name => 'usr/local/lib/node_modules/openclaw/' + name).sort());
+            assert.deepEqual(files.filter(file => file.includes('/node_modules/koffi/build/')).map(file => file.replace(/^\/+/, '')),
+              ['usr/local/lib/node_modules/openclaw/node_modules/koffi/build/koffi/freebsd_x64/koffi.node']);
+            assert.equal(files.some(file => file.includes('/node_modules/tree-sitter-bash/build/')), false);
             assert.ok(fs.statSync(path.join(stage, 'usr/local/bin/openclaw')).mode & 0o111);
             assert.ok(fs.readFileSync(path.join(stage, 'usr/local/bin/openclaw'), 'utf8').includes('exec /usr/local/lib/node_modules/openclaw/openclaw.mjs "$@"'));
             const version = execFileSync('node', [path.join(runtime, 'openclaw.mjs'), '--version'], {encoding: 'utf8', timeout: 60000}).trim();
@@ -249,7 +252,7 @@ jobs:
             done
             echo 'PASS Ports stage/package with optional skill dependencies disabled; no package install, service or upgrade claim'
             DRIVER
-            test "$(sha256 -q "$driver")" = '30684acd07ae8b95f4af53662c1d306b4824e2a194fba781f20047710357a51b'
+            test "$(sha256 -q "$driver")" = 'cd3e544f151c370bae889dc2be84e0cca4b0a5271c528aff79fa952a68d730e3'
             sh "$driver" /tmp/openclaw-ports-export
       - name: Transfer only the three bounded proof files
         shell: python
