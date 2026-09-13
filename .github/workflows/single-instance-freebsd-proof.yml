@@ -20,11 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: db4a92ed9450dbba76b4fbfda5af0c20ab25e32b
+          ref: 642a7004b88e182d045f053f1a880f8ef8454770
           persist-credentials: false
       - name: Install native dependencies
         run: |
-          test "$(git rev-parse HEAD)" = db4a92ed9450dbba76b4fbfda5af0c20ab25e32b
+          test "$(git rev-parse HEAD)" = 642a7004b88e182d045f053f1a880f8ef8454770
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libwebkit2gtk-4.1-dev dbus
           rustup toolchain install stable --profile minimal
@@ -46,10 +46,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: db4a92ed9450dbba76b4fbfda5af0c20ab25e32b
+          ref: 642a7004b88e182d045f053f1a880f8ef8454770
           persist-credentials: false
       - name: Verify candidate source
-        run: test "$(git rev-parse HEAD)" = db4a92ed9450dbba76b4fbfda5af0c20ab25e32b
+        run: test "$(git rev-parse HEAD)" = 642a7004b88e182d045f053f1a880f8ef8454770
       - name: Test on native FreeBSD
         uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
         with:
@@ -68,7 +68,7 @@ jobs:
           run: |
             set -eu
             # rsync preserves the host owner; trust only this verified checkout.
-            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = db4a92ed9450dbba76b4fbfda5af0c20ab25e32b
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = 642a7004b88e182d045f053f1a880f8ef8454770
             freebsd-version
             rustc --version
             cargo --version
