@@ -140,13 +140,14 @@ jobs:
             pkg info -e 'node24>=24.16.0'
             pkg info -e 'npm-node24>=0'
             mkdir "$root/ports" "$root/packages"
-            # Read only the official framework and tools from one exact source snapshot.
+            # Read the official framework, tools and required Python version include.
             timeout 180 fetch -q -o "$root/ports.tgz" \
               "https://codeload.github.com/freebsd/freebsd-ports/tar.gz/$ports_sha"
             [ "$(stat -f %z "$root/ports.tgz")" -lt 536870912 ]
             tar -xzf "$root/ports.tgz" --strip-components 1 -C "$root/ports" \
               "freebsd-ports-$ports_sha/Mk" "freebsd-ports-$ports_sha/Tools" \
-              "freebsd-ports-$ports_sha/Templates" "freebsd-ports-$ports_sha/Keywords"
+              "freebsd-ports-$ports_sha/Templates" "freebsd-ports-$ports_sha/Keywords" \
+              "freebsd-ports-$ports_sha/lang/python312/Makefile.version"
             rm "$root/ports.tgz"
             [ "$(sha256 -q "$root/ports/Tools/scripts/npmjs-fetch-with-dependencies.sh")" = 1a7b0b2cb656a2ea80b49f68e0a4b5e39f519a72065ba5206c8b706c072c21a4 ]
             port="$root/ports/misc/openclaw"
@@ -248,7 +249,7 @@ jobs:
             done
             echo 'PASS Ports stage/package with optional skill dependencies disabled; no package install, service or upgrade claim'
             DRIVER
-            test "$(sha256 -q "$driver")" = 'bfd1a369bf98b997b62b4d3a71bd01efeca1ac4a0b33c46396b21df397e27af7'
+            test "$(sha256 -q "$driver")" = '30684acd07ae8b95f4af53662c1d306b4824e2a194fba781f20047710357a51b'
             sh "$driver" /tmp/openclaw-ports-export
       - name: Transfer only the three bounded proof files
         shell: python
