@@ -24,11 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: vincentkoc/tauri
-          ref: cd680bd4b7013131f7c0f30cf2ea16ab9cf0f51b
+          repository: vincentkoc/plugins-workspace
+          ref: 63cc1498f62f834225ce5495f40e4b89bc632dde
           persist-credentials: false
       - name: Verify candidate source
-        run: test "$(git rev-parse HEAD)" = 'cd680bd4b7013131f7c0f30cf2ea16ab9cf0f51b'
+        run: test "$(git rev-parse HEAD)" = '63cc1498f62f834225ce5495f40e4b89bc632dde'
       - name: Test on native FreeBSD
         uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
         with:
@@ -44,14 +44,20 @@ jobs:
             cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
             FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
             REPO
-            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 dbus
+            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 dbus xdg-utils desktop-file-utils
           run: |
             set -eu
-            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = 'cd680bd4b7013131f7c0f30cf2ea16ab9cf0f51b'
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = '63cc1498f62f834225ce5495f40e4b89bc632dde'
             freebsd-version
             rustc --version
             cargo --version
             pkg-config --modversion gtk+-3.0 webkit2gtk-4.1
             sha256 -q Cargo.lock
-            cargo test --locked --package tauri-utils --lib platform::tests
-            cargo clippy --locked --package tauri-utils --lib --tests
+            echo 'COMPOSED source: reviewed single-instance and deep-link candidates'
+            cargo test --locked --package tauri-plugin-single-instance --features deep-link --all-targets
+            cargo test --locked --package tauri-plugin-deep-link --all-targets
+            timeout -k 5s 90s dbus-run-session -- cargo test --locked --package tauri-plugin-single-instance --features deep-link --test dbus -- --ignored --exact dbus_handoff_and_release --nocapture
+            timeout -k 5s 90s dbus-run-session -- cargo test --locked --package tauri-plugin-single-instance --features deep-link --test dbus_errors -- --ignored --exact dbus_setup_errors --nocapture
+            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg -- --ignored --exact xdg_registration --nocapture
+            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_commands -- --ignored --exact xdg_command_results --nocapture
+            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_unregister -- --ignored --exact xdg_unregister --nocapture
