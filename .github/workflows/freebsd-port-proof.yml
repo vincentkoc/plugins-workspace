@@ -35,7 +35,7 @@ jobs:
             REPO
             pkg install -y node24
           run: |
-            # Reviewed script SHA-256: b91ccb266c73ac8d5be43f723cdc193a3d50694c8f35e4e86805f40eac707bd0
+            # Reviewed script SHA-256: ae9dcfbdb2ad439f122e1fdb52352ec25efc83f665132be4670cfe51bf1506a3
             #!/bin/sh
             # Disposable FreeBSD-only proof of the packaged rc.d account/HOME contract.
             set -eu
@@ -51,6 +51,8 @@ jobs:
             created_user=no
             running=no
             fixture_pid=
+            supervisor_pid=
+            supervisor_command=
             cleanup() {
               result=$?
               if [ -z "$fixture_pid" ] && [ -s "$work/service.pid" ]; then
@@ -69,6 +71,25 @@ jobs:
                   *) echo "fixture PID identity changed; retained test state" >&2; exit 1 ;;
                 esac
               fi
+              if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+                if [ -n "$supervisor_command" ] && [ "$(ps -p "$supervisor_pid" -o command=)" = "$supervisor_command" ]; then
+                  kill -TERM "$supervisor_pid" || result=1
+                  result=1
+                  attempts=0
+                  while kill -0 "$supervisor_pid" 2>/dev/null; do
+                    if [ "$(ps -p "$supervisor_pid" -o command=)" != "$supervisor_command" ]; then
+                      echo "supervisor PID identity changed; retained test state" >&2
+                      exit 1
+                    fi
+                    attempts=$((attempts + 1))
+                    [ "$attempts" -le 10 ] || { echo "supervisor survived cleanup; retained test state" >&2; exit 1; }
+                    sleep 1
+                  done
+                else
+                  echo "supervisor PID identity changed; retained test state" >&2
+                  exit 1
+                fi
+              fi
               if [ "$created_user" = yes ]; then pw userdel "$account" || result=1; fi
               rm -rf "$work"
               exit "$result"
@@ -79,15 +100,15 @@ jobs:
             mkdir -p "$work/prefix/bin"
             ln -s "$node" "$work/prefix/bin/node"
             fetch -q -o "$work/openclaw.in" \
-              https://raw.githubusercontent.com/vincentkoc/freebsd-ports/50ad551015018f7a83a7440f8269280539ac5c37/misc/openclaw/files/openclaw.in
-            [ "$(sha256 -q "$work/openclaw.in")" = 93a9184f15ffd3b052b87a1e8ff10621905dc7ca21ee6fa25b2a78f01c97b835 ]
+              https://raw.githubusercontent.com/vincentkoc/freebsd-ports/82ac288f06a587da732bdf13aee2f68ba668adb5/misc/openclaw/files/openclaw.in
+            [ "$(sha256 -q "$work/openclaw.in")" = 4d23ab3573030234fcc309cc0e35c3e2412d27c0e2b0fb13661ffe95c4333aeb ]
             sed "s|%%PREFIX%%|$work/prefix|g" "$work/openclaw.in" > "$work/openclaw"
             cat > "$work/probe.mjs" <<'JS'
             import fs from 'node:fs';
             import os from 'node:os';
             fs.writeFileSync(process.env.PROBE_RECORD, JSON.stringify({
               uid: process.getuid(), home: os.homedir(), envHome: process.env.HOME,
-              args: process.argv.slice(2), pid: process.pid,
+              args: process.argv.slice(2), pid: process.pid, ppid: process.ppid,
             }));
             process.on('SIGTERM', () => process.exit(0));
             setInterval(() => {}, 1000);
@@ -130,6 +151,12 @@ jobs:
               fixture_pid=$("$node" -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).pid' "$record")
               case "$fixture_pid" in ''|*[!0-9]*) echo "invalid fixture PID" >&2; exit 1;; esac
               kill -0 "$fixture_pid"
+              supervisor_pid=$("$node" -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).ppid' "$record")
+              case "$supervisor_pid" in ''|*[!0-9]*) echo "invalid supervisor PID" >&2; exit 1;; esac
+              supervisor_command=$(ps -p "$supervisor_pid" -o command=)
+              [ "$(ps -p "$supervisor_pid" -o uid= | xargs)" = 0 ]
+              [ "$(ps -p "$supervisor_pid" -o comm= | xargs)" = daemon ]
+              echo "PASS live parent PID=$supervisor_pid UID=0 command=$supervisor_command"
               "$node" - "$record" "$expected_uid" "$expected_home" <<'JS'
             const fs = require('node:fs');
             const assert = require('node:assert/strict');
@@ -157,11 +184,20 @@ jobs:
                 [ "$attempts" -le 10 ] || { echo "daemon did not remove its PID file" >&2; exit 1; }
                 sleep 1
               done
+              attempts=0
+              while kill -0 "$supervisor_pid" 2>/dev/null; do
+                attempts=$((attempts + 1))
+                [ "$attempts" -le 10 ] || { echo "supervisor survived child stop" >&2; exit 1; }
+                sleep 1
+              done
+              supervisor_pid=
+              supervisor_command=
             }
             root_home=$(pw usershow root -7 | cut -d: -f6)
             run_case root "$work/default.json" 0 "$root_home"
             run_case "$account" "$work/account-home/account.json" "$(id -u "$account")" "$work/account-home"
-            echo 'PASS existing rc.d honors the documented non-root account and home; no real gateway or upgrade claim'
+            run_case "$account" "$work/account-home/account-repeat.json" "$(id -u "$account")" "$work/account-home"
+            echo 'PASS rc.d preserves child account/HOME and removes PID files on repeated starts/stops; no real gateway or upgrade claim'
 
   private-layout:
     if: github.repository == 'vincentkoc/plugins-workspace'
@@ -185,7 +221,7 @@ jobs:
             REPO
             pkg install -y node24 npm-node24 git python3 gmake
           run: |
-            # Reviewed script SHA-256: a0124227c398c888aeb3ae4a973f38d5b02d23537534e1349d9f0ec61b09e075
+            # Reviewed script SHA-256: 39349cdbf9c9cd449f0d3bdda7bef3350443a1aa12244ee6bf9abb8c4b3b30b1
             #!/bin/sh
             # Disposable FreeBSD proof for the package-owned private runtime layout.
             set -eu
@@ -198,10 +234,18 @@ jobs:
             [ -z "${OPENCLAW_SUPERVISOR_MODE-}" ]
             [ -z "${OPENCLAW_HOME-}${OPENCLAW_STATE_DIR-}${OPENCLAW_CONFIG_PATH-}${OPENCLAW_PROFILE-}" ]
             work=$(mktemp -d /tmp/openclaw-private-layout.XXXXXX)
+            stage=install
             # Retain this task-only directory on failure for the CI artifact/diagnostic owner.
             cleanup() {
               result=$?
-              if [ "$result" -eq 0 ]; then rm -rf "$work"; else echo "retained failed proof: $work" >&2; fi
+              if [ "$result" -eq 0 ]; then
+                rm -rf "$work"
+              else
+                echo "failed stage: $stage; retained failed proof: $work" >&2
+                for label in default stable beta tag; do
+                  if [ -f "$work/$label.log" ]; then cat "$work/$label.log"; fi
+                done
+              fi
               exit "$result"
             }
             trap cleanup EXIT
@@ -220,7 +264,7 @@ jobs:
             JS
             # This is ordinary native npm installation; scripts and optional dependencies run.
             env HOME="$work/home" npm install --prefix "$work/staging" --install-strategy=nested \
-              --omit=dev --no-audit --no-fund "$work/openclaw.tgz"
+              --omit=dev --no-audit --no-fund --foreground-scripts "$work/openclaw.tgz"
             [ -d "$work/staging/node_modules/openclaw" ]
             mv "$work/staging/node_modules/openclaw" "$work/prefix/libexec/openclaw"
             runtime="$work/prefix/libexec/openclaw"
@@ -248,16 +292,21 @@ jobs:
             config="$work/home/.openclaw/openclaw.json"
             package_before=$(node "$work/fingerprint.cjs" "$runtime")
             config_before=$(sha256 -q "$config")
+            stage=version
             env HOME="$work/home" PATH="$work/prefix/bin:$PATH" \
               timeout 60 "$work/prefix/bin/openclaw" --version
             [ "$(node -p "require('$runtime/package.json').version")" = 2026.9.4 ]
+            stage=version-package-fingerprint
             [ "$(node "$work/fingerprint.cjs" "$runtime")" = "$package_before" ]
+            stage=version-config-fingerprint
             [ "$(sha256 -q "$config")" = "$config_before" ]
             # A private package root must never be recognized as an npm global installation.
             global_root=$(env HOME="$work/home" npm root --global)
+            stage=global-root
             [ "$global_root/openclaw" != "$runtime" ]
             run_refusal() {
               label=$1
+              stage="refusal-$label"
               shift
               rc=0
               env HOME="$work/home" PATH="$work/prefix/bin:$PATH" \
