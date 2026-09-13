@@ -25,12 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - package: tauri-plugin-updater
-            source: ed9f8d7ef38c58f2ec3dffe4c6431300ce4ea15f
-            args: --lib --test bsd
-            extra-packages: ''
           - package: tauri-plugin-deep-link
-            source: 3d745d015220fefeb9152841095afb4799db5e3d
+            source: 6fb82373ab2fbc52fe78ad58c86d5ab196c5ec26
             args: --all-targets
             extra-packages: xdg-utils desktop-file-utils
     steps:
