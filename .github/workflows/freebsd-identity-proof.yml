@@ -1,0 +1,321 @@
+# Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+
+name: Temporary FreeBSD native identity contract proof
+
+on:
+  push:
+    branches: [proof/freebsd-fixes]
+    paths: [.github/workflows/freebsd-identity-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Verify native identity and guest clock contract
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: ${{ matrix.arch }}
+          mem: 6144
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+            pkg install -y node24 npm-node24
+          run: |
+            set -eu
+            freebsd-version
+            uname -m
+            node --version
+            npm --version
+            driver=$(mktemp /tmp/freebsd-identity-driver.XXXXXX)
+            trap 'rm -f "$driver"' EXIT
+            trap 'exit 1' HUP INT TERM
+            cat > "$driver" <<'PROOF_SCRIPT'
+            #!/bin/sh
+            set -eu
+
+            test "$(uname -s)" = FreeBSD
+            test "$(id -u)" = 0
+            case "$(uname -m)" in amd64|arm64) ;; *) exit 1 ;; esac
+            probe_dir=$(mktemp -d)
+            cleanup() {
+              cleanup_rc=$1
+              trap - EXIT HUP INT TERM
+              if test -f "$probe_dir/clock-state"; then
+                if ! "$probe_dir/clock" restore "$probe_dir/clock-state"; then
+                  echo "clock restoration failed; recovery helper and checkpoint retained at $probe_dir" >&2
+                  exit 1
+                fi
+                echo "guest clock restored from original realtime and monotonic checkpoint"
+              fi
+              rm -rf "$probe_dir"
+              exit "$cleanup_rc"
+            }
+            trap 'cleanup $?' EXIT
+            trap 'exit 129' HUP
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            cat > "$probe_dir/clock.c" <<'C'
+            #include <sys/types.h>
+            #include <sys/user.h>
+            #include <stddef.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <string.h>
+            #include <time.h>
+
+            _Static_assert(sizeof(struct kinfo_proc) == 1088, "kinfo_proc size");
+            _Static_assert(offsetof(struct kinfo_proc, ki_structsize) == 0, "size offset");
+            _Static_assert(offsetof(struct kinfo_proc, ki_layout) == 4, "layout offset");
+            _Static_assert(offsetof(struct kinfo_proc, ki_pid) == 72, "pid offset");
+            _Static_assert(offsetof(struct kinfo_proc, ki_start) == 336, "start offset");
+            _Static_assert(sizeof(struct timeval) == 16, "timeval size");
+            _Static_assert(sizeof(time_t) == 8, "time_t size");
+            _Static_assert(sizeof(suseconds_t) == 8, "suseconds_t size");
+
+            int main(int argc, char **argv) {
+              if (argc == 1) {
+                puts("native ABI: kinfo_proc=1088 pid=72 start=336 timeval=16");
+                return 0;
+              }
+              if (argc != 3) return 2;
+              struct { struct timespec real, monotonic; } saved;
+              struct timespec now, target;
+              if (strcmp(argv[1], "step") == 0) {
+                if (clock_gettime(CLOCK_REALTIME, &saved.real) != 0 ||
+                    clock_gettime(CLOCK_MONOTONIC, &saved.monotonic) != 0) return 3;
+                FILE *file = fopen(argv[2], "wx");
+                if (!file) return 4;
+                if (fwrite(&saved, sizeof(saved), 1, file) != 1 || fclose(file) != 0) return 5;
+                target = saved.real;
+                target.tv_sec += 60;
+              } else if (strcmp(argv[1], "restore") == 0) {
+                FILE *file = fopen(argv[2], "r");
+                if (!file) return 4;
+                if (fread(&saved, sizeof(saved), 1, file) != 1 || fclose(file) != 0) return 5;
+                if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 3;
+                target.tv_sec = saved.real.tv_sec + now.tv_sec - saved.monotonic.tv_sec;
+                target.tv_nsec = saved.real.tv_nsec + now.tv_nsec - saved.monotonic.tv_nsec;
+                if (target.tv_nsec < 0) { target.tv_nsec += 1000000000; target.tv_sec--; }
+                if (target.tv_nsec >= 1000000000) { target.tv_nsec -= 1000000000; target.tv_sec++; }
+              } else return 2;
+              if (clock_settime(CLOCK_REALTIME, &target) != 0) {
+                perror("clock_settime");
+                return 4;
+              }
+              return 0;
+            }
+            C
+            cc -Wall -Wextra -Werror -o "$probe_dir/clock" "$probe_dir/clock.c"
+            "$probe_dir/clock"
+            npm install --prefix "$probe_dir/install" --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact koffi@3.2.1
+            node --input-type=module - "$probe_dir" <<'STAGE'
+            import assert from 'node:assert/strict';
+            import fs from 'node:fs';
+            import path from 'node:path';
+            import { createRequire } from 'node:module';
+            import { createHash } from 'node:crypto';
+            const root = process.argv[2];
+            const req = createRequire(path.join(root, 'install', 'package.json'));
+            const koffiRoot = path.dirname(req.resolve('koffi/indirect'));
+            const nativeName = `@koromix/koffi-freebsd-${process.arch}`;
+            const nativeRoot = path.dirname(createRequire(path.join(koffiRoot, 'package.json')).resolve(nativeName));
+            const files = [
+              ...['package.json', 'indirect.cjs', 'src/koffi/indirect.cjs', 'LICENSE.txt'].map(file => [path.join(koffiRoot, file), `koffi/${file}`]),
+              ...['package.json', 'index.js', `freebsd_${process.arch}/koffi.node`].map(file => [path.join(nativeRoot, file), `${nativeName}/${file}`]),
+            ];
+            const inventory = [];
+            for (const [source, relative] of files) {
+              const destination = path.join(root, 'runtime', 'node_modules', relative);
+              const bytes = fs.readFileSync(source);
+              fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+              fs.writeFileSync(destination, bytes, { flag: 'wx', mode: 0o600 });
+              assert.ok(fs.lstatSync(destination).isFile());
+              inventory.push({ relative, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+            }
+            fs.renameSync(path.join(root, 'install'), path.join(root, 'retained-install'));
+            console.log(JSON.stringify({ staged: inventory, originalPackage: 'unavailable' }));
+            STAGE
+            native_arch=$(node -p 'process.arch')
+            native_file="$probe_dir/runtime/node_modules/@koromix/koffi-freebsd-$native_arch/freebsd_$native_arch/koffi.node"
+            node --input-type=module - "$native_file" <<'ELF'
+            import assert from 'node:assert/strict';
+            import { execFileSync } from 'node:child_process';
+            const file = process.argv[2];
+            const dynamic = execFileSync('readelf', ['-d', file], { encoding: 'utf8', timeout: 5000 });
+            assert.doesNotMatch(dynamic, /\((?:RPATH|RUNPATH)\)/);
+            const expected = ['libc++.so.1', 'libcxxrt.so.1', 'libm.so.5', 'libc.so.7'].sort();
+            const needed = [...dynamic.matchAll(/\(NEEDED\).*\[([^\]]+)\]/g)].map(match => match[1]).sort();
+            assert.deepEqual(needed, expected);
+            const linked = execFileSync('ldd', [file], { encoding: 'utf8', timeout: 5000 });
+            const libraries = [...linked.matchAll(/^\s*(\S+) => (\S+) \(/gm)].map(match => ({ name: match[1], path: match[2] }));
+            assert.deepEqual(libraries.map(lib => lib.name).sort(), expected);
+            for (const lib of libraries) assert.ok(lib.path === `/lib/${lib.name}` || lib.path === `/usr/lib/${lib.name}`, `${lib.name}: unexpected resolution ${lib.path}`);
+            console.log(JSON.stringify({ elf: { needed, rpath: 'absent', runpath: 'absent', resolved: libraries } }));
+            ELF
+            cat > "$probe_dir/probe.mjs" <<'JS'
+            import assert from 'node:assert/strict';
+            import { execFileSync, spawn, spawnSync } from 'node:child_process';
+            import { once } from 'node:events';
+            import { fileURLToPath } from 'node:url';
+            import fs from 'node:fs';
+            import path from 'node:path';
+            import { createRequire } from 'node:module';
+            const require = createRequire(import.meta.url);
+            if (process.argv[2] === 'resources') process.resourcesPath = '/unavailable-native-resources';
+            assert.equal(process.resourcesPath, undefined);
+            assert.equal(process.platform, 'freebsd');
+            assert.ok(['x64', 'arm64'].includes(process.arch));
+            const nativeRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), 'runtime', 'node_modules', `@koromix/koffi-freebsd-${process.arch}`);
+            const metadata = JSON.parse(fs.readFileSync(path.join(nativeRoot, 'package.json'), 'utf8'));
+            assert.deepEqual(metadata.os, ['freebsd']);
+            assert.deepEqual(metadata.cpu, [process.arch]);
+            assert.equal(metadata.version, '3.2.1');
+            const koffi = require('./runtime/node_modules/koffi/indirect.cjs');
+            assert.equal(koffi.version, '3.2.1');
+            const libc = koffi.load(null);
+            const sysctlbyname = libc.func('int sysctlbyname(const char *name, _Out_ void *oldp, _Inout_ size_t *oldlenp, const void *newp, size_t newlen)');
+
+            // Contract probe only: production code must preserve its canonical env boundary.
+            function readIdentity(pid) {
+              try {
+                const bytes = Buffer.alloc(1120);
+                for (const [name, offset, length] of [
+                  ['kern.boottime', 0, 16], [`kern.proc.pid.${pid}`, 16, 1088], ['kern.boottime', 1104, 16],
+                ]) {
+                  const actual = [length];
+                  if (sysctlbyname(name, bytes.subarray(offset, offset + length), actual, null, 0) !== 0 || actual[0] !== length) return null;
+                }
+                if (bytes.length !== 1120 || !bytes.subarray(0, 16).equals(bytes.subarray(1104)) ||
+                    bytes.readInt32LE(16) !== 1088 || bytes.readInt32LE(20) !== 0 ||
+                    bytes.readInt32LE(88) !== pid) return null;
+                const timeval = (offset) => {
+                  const sec = bytes.readBigInt64LE(offset);
+                  const usec = bytes.readBigInt64LE(offset + 8);
+                  if (sec < 0n || usec < 0n || usec >= 1_000_000n) throw new Error('invalid timeval');
+                  return sec * 1_000_000n + usec;
+                };
+                const start = timeval(352) - timeval(0);
+                return start >= 0n && start <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(start) : null;
+              } catch {
+                return null;
+              }
+            }
+
+            if (process.argv[2] === 'load') {
+              console.log('staged native load passed');
+            } else if (process.argv[2] === 'child') {
+              process.on('message', () => process.exit(0));
+              process.send(readIdentity(process.pid));
+            } else if (process.argv[2] === 'foreign') {
+              console.log(readIdentity(Number(process.argv[3])));
+            } else {
+              assert.equal(process.platform, 'freebsd');
+              assert.ok(['x64', 'arm64'].includes(process.arch));
+              const self = readIdentity(process.pid);
+              assert.ok(Number.isSafeInteger(self) && self > 0);
+              assert.equal(readIdentity(process.pid), self);
+              assert.equal(readIdentity(2 ** 30), null);
+              const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'child'], {
+                stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+              });
+              const exit = once(child, 'exit');
+              try {
+                const [identity] = await Promise.race([
+                  once(child, 'message', { signal: AbortSignal.timeout(5000) }),
+                  exit.then(() => { throw new Error('child exited before identity'); }),
+                ]);
+                assert.ok(Number.isSafeInteger(identity) && identity > 0);
+                assert.equal(readIdentity(child.pid), identity);
+                child.send('exit');
+                const [code] = await exit;
+                assert.equal(code, 0);
+                assert.equal(readIdentity(child.pid), null);
+              } finally {
+                if (child.exitCode === null && child.signalCode === null) {
+                  child.kill('SIGKILL');
+                  await exit;
+                }
+              }
+              const entry = fileURLToPath(import.meta.url);
+              const expectLoadFailure = (label, mode = 'load') => {
+                const result = spawnSync(process.execPath, [entry, mode], { timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+                assert.equal(result.error, undefined, `${label}: subprocess failed to execute`);
+                assert.equal(result.signal, null, `${label}: native loader crashed`);
+                assert.equal(result.status, 1, `${label}: expected a caught load rejection`);
+                return result.stderr.toString();
+              };
+              const nativeFile = path.join(nativeRoot, `freebsd_${process.arch}`, 'koffi.node');
+              const nativeBytes = fs.readFileSync(nativeFile);
+              // Recreate a new inode before corruption so the parent
+              // never truncates the addon it already mapped.
+              fs.unlinkSync(nativeFile);
+              try { expectLoadFailure('missing native'); }
+              finally { fs.writeFileSync(nativeFile, nativeBytes, { mode: 0o600, flag: 'wx' }); }
+              fs.writeFileSync(nativeFile, Buffer.from('invalid native image'));
+              try { expectLoadFailure('corrupt native'); }
+              finally { fs.writeFileSync(nativeFile, nativeBytes); }
+              const metadataFile = path.join(nativeRoot, 'package.json');
+              const originalMetadata = fs.readFileSync(metadataFile);
+              for (const mismatch of [{ version: '0.0.0' }, { cpu: ['invalid'] }]) {
+                fs.writeFileSync(metadataFile, JSON.stringify({ ...metadata, ...mismatch }));
+                try { expectLoadFailure('metadata mismatch'); }
+                finally { fs.writeFileSync(metadataFile, originalMetadata); }
+              }
+              const indirectFile = path.join(path.dirname(nativeRoot), '..', 'koffi', 'src', 'koffi', 'indirect.cjs');
+              const indirectBytes = fs.readFileSync(indirectFile);
+              const indirectText = indirectBytes.toString();
+              const versionLiteral = 'version: "3.2.1"';
+              assert.equal(indirectText.split(versionLiteral).length - 1, 1);
+              fs.writeFileSync(indirectFile, indirectText.replace(versionLiteral, 'version: "0.0.0"'));
+              try { assert.match(expectLoadFailure('JS/native version mismatch'), /Mismatched native Koffi modules/); }
+              finally { fs.writeFileSync(indirectFile, indirectBytes); }
+              expectLoadFailure('external resource path', 'resources');
+              assert.match(execFileSync(process.execPath, [entry, 'load'], { encoding: 'utf8', timeout: 5000 }), /staged native load passed/);
+              const boot = execFileSync('/sbin/sysctl', ['-b', 'kern.boot_id'], { maxBuffer: 16, timeout: 1000 });
+              assert.equal(boot.length, 16);
+              assert.ok(boot.equals(execFileSync('/sbin/sysctl', ['-b', 'kern.boot_id'], { maxBuffer: 16, timeout: 1000 })));
+              let checkpointed = false;
+              try {
+                checkpointed = true;
+                execFileSync(process.argv[2], ['step', process.argv[3]]);
+                assert.equal(readIdentity(process.pid), self);
+                const foreign = execFileSync(process.execPath, [
+                  fileURLToPath(import.meta.url), 'foreign', String(process.pid),
+                ], { encoding: 'utf8', timeout: 5000 });
+                assert.equal(Number(foreign.trim()), self);
+              } finally {
+                if (checkpointed) execFileSync(process.argv[2], ['restore', process.argv[3]]);
+              }
+              assert.equal(readIdentity(process.pid), self);
+              console.log(JSON.stringify({
+                platform: process.platform, arch: process.arch,
+                self: 'stable', child: 'cross-process match', reaped: 'null',
+                clockStep: 'stable across +60s and monotonic-adjusted restoration', invalidPid: 'null',
+                staged: 'original package unavailable; fresh process reload passed',
+                failures: 'missing/corrupt/version/arch/resources refused', bootToken: '16 binary bytes; repeated equality',
+              }));
+            }
+            JS
+            node "$probe_dir/probe.mjs" "$probe_dir/clock" "$probe_dir/clock-state"
+            PROOF_SCRIPT
+            test "$(sha256 -q "$driver")" = '103870b2944801fc4f4ad1c01c68d70d8cd24f3b8dbd5f1544be28dd33f73b86'
+            timeout -k 15s 120s sh "$driver"
