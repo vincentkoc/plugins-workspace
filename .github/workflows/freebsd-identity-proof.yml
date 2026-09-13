@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64]
+        arch: [x86_64, aarch64]
     steps:
       - name: Verify native identity and guest clock contract
         uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
@@ -76,12 +76,14 @@ jobs:
             cat > "$probe_dir/clock.c" <<'C'
             #include <sys/types.h>
             #include <sys/user.h>
+            #include <sys/sysctl.h>
             #include <stddef.h>
             #include <stdio.h>
             #include <stdlib.h>
             #include <string.h>
             #include <time.h>
 
+            _Static_assert(CTL_KERN == 1 && KERN_PROC == 14 && KERN_PROC_PID == 1 && KERN_BOOTTIME == 21, "sysctl MIB constants");
             _Static_assert(sizeof(struct kinfo_proc) == 1088, "kinfo_proc size");
             _Static_assert(offsetof(struct kinfo_proc, ki_structsize) == 0, "size offset");
             _Static_assert(offsetof(struct kinfo_proc, ki_layout) == 4, "layout offset");
@@ -194,18 +196,22 @@ jobs:
             const koffi = require('./runtime/node_modules/koffi/indirect.cjs');
             assert.equal(koffi.version, '3.2.1');
             const libc = koffi.load(null);
-            const sysctlbyname = libc.func('int sysctlbyname(const char *name, _Out_ void *oldp, _Inout_ size_t *oldlenp, const void *newp, size_t newlen)');
+            // Match FreeBSD libutil/kinfo_getproc.c: dynamic PID handlers require the numeric MIB.
+            const sysctl = libc.func('int sysctl(const int *name, unsigned int namelen, _Out_ void *oldp, _Inout_ size_t *oldlenp, const void *newp, size_t newlen)');
 
             // Contract probe only: production code must preserve its canonical env boundary.
-            function readIdentity(pid) {
+            function readIdentity(pid, diagnostic = false) {
               try {
                 const bytes = Buffer.alloc(1120);
-                for (const [name, offset, length] of [
-                  ['kern.boottime', 0, 16], [`kern.proc.pid.${pid}`, 16, 1088], ['kern.boottime', 1104, 16],
+                for (const [mib, offset, length] of [
+                  [[1, 21], 0, 16], [[1, 14, 1, pid], 16, 1088], [[1, 21], 1104, 16],
                 ]) {
                   const actual = [length];
-                  if (sysctlbyname(name, bytes.subarray(offset, offset + length), actual, null, 0) !== 0 || actual[0] !== length) return null;
+                  const status = sysctl(mib, mib.length, bytes.subarray(offset, offset + length), actual, null, 0);
+                  if (diagnostic) console.log(JSON.stringify({ mib, status, errno: status === 0 ? null : koffi.errno(), length: String(actual[0]), lengthType: typeof actual[0] }));
+                  if (status !== 0 || actual[0] !== length) return null;
                 }
+                if (diagnostic) console.log(JSON.stringify({ structsize: bytes.readInt32LE(16), layout: bytes.readInt32LE(20), pid: bytes.readInt32LE(88), before: bytes.subarray(0, 16).toString('hex'), after: bytes.subarray(1104).toString('hex'), start: bytes.subarray(352, 368).toString('hex') }));
                 if (bytes.length !== 1120 || !bytes.subarray(0, 16).equals(bytes.subarray(1104)) ||
                     bytes.readInt32LE(16) !== 1088 || bytes.readInt32LE(20) !== 0 ||
                     bytes.readInt32LE(88) !== pid) return null;
@@ -217,7 +223,8 @@ jobs:
                 };
                 const start = timeval(352) - timeval(0);
                 return start >= 0n && start <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(start) : null;
-              } catch {
+              } catch (error) {
+                if (diagnostic) console.log(JSON.stringify({ error: String(error) }));
                 return null;
               }
             }
@@ -232,7 +239,7 @@ jobs:
             } else {
               assert.equal(process.platform, 'freebsd');
               assert.ok(['x64', 'arm64'].includes(process.arch));
-              const self = readIdentity(process.pid);
+              const self = readIdentity(process.pid, true);
               assert.ok(Number.isSafeInteger(self) && self > 0);
               assert.equal(readIdentity(process.pid), self);
               assert.equal(readIdentity(2 ** 30), null);
@@ -319,5 +326,5 @@ jobs:
             JS
             node "$probe_dir/probe.mjs" "$probe_dir/clock" "$probe_dir/clock-state"
             PROOF_SCRIPT
-            test "$(sha256 -q "$driver")" = '88b7491e52ffeefcec3113f7d8642bf84f5acc316a33f8489526334df23719aa'
+            test "$(sha256 -q "$driver")" = 'f59aa3eeac9b9f91f2af91ecff3416d2ff3f2b4eb2d051c65ad498ce826bd98e'
             timeout -k 15s 120s sh "$driver"
