@@ -20,15 +20,15 @@ jobs:
   freebsd:
     if: github.repository == 'vincentkoc/plugins-workspace'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: vincentkoc/auto-launch
-          ref: cd52eaa3ac2a045a42af8bc24dcc636def861fcc
+          repository: vincentkoc/plugins-workspace
+          ref: ddfff742ce62d4b20dbe7b514f6fba77f5c998c7
           persist-credentials: false
       - name: Verify candidate source
-        run: test "$(git rev-parse HEAD)" = 'cd52eaa3ac2a045a42af8bc24dcc636def861fcc'
+        run: test "$(git rev-parse HEAD)" = 'ddfff742ce62d4b20dbe7b514f6fba77f5c998c7'
       - name: Test on native FreeBSD
         uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
         with:
@@ -44,13 +44,16 @@ jobs:
             cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
             FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
             REPO
-            pkg install -y rust git glib
+            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 xdg-utils desktop-file-utils
           run: |
             set -eu
-            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = 'cd52eaa3ac2a045a42af8bc24dcc636def861fcc'
+            test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = 'ddfff742ce62d4b20dbe7b514f6fba77f5c998c7'
             freebsd-version
             rustc --version
             cargo --version
-            gio version
+            pkg-config --modversion gtk+-3.0 webkit2gtk-4.1
             sha256 -q Cargo.lock
-            timeout -k 15s 300s cargo test --locked --lib --test xdg_exec
+            echo 'COMPOSED source: corrected XDG fixtures; prior D-Bus proof retained'
+            cargo test --locked --package tauri-plugin-deep-link --all-targets
+            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_commands -- --ignored --exact xdg_command_results --nocapture
+            timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg_unregister -- --ignored --exact xdg_unregister --nocapture
