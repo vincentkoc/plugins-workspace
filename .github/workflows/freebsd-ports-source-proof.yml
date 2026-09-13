@@ -118,7 +118,11 @@ jobs:
             owned_mount
             mkdir "$work/scratch/home" "$work/scratch/tmp" "$work/scratch/export"
             export HOME="$work/scratch/home" TMPDIR="$work/scratch/tmp"
-            export npm_config_userconfig=/dev/null npm_config_globalconfig=/dev/null
+            # npm rejects one source path loaded as both user and global configuration.
+            : > "$work/scratch/npm-user.conf"
+            : > "$work/scratch/npm-global.conf"
+            export npm_config_userconfig="$work/scratch/npm-user.conf"
+            export npm_config_globalconfig="$work/scratch/npm-global.conf"
             export npm_config_cache="$work/scratch/npm-cache"
             export npm_config_force=true npm_config_audit=false npm_config_fund=false
             export LOCALBASE=/usr/local PYTHON=/usr/local/bin/python3
@@ -240,7 +244,7 @@ jobs:
             done
             echo 'PASS Ports source preparation and two native addon builds; package stage/install/upgrade still pending'
             DRIVER
-            test "$(sha256 -q "$driver")" = 'cf7fec404d7c82a630c294a9bb50152f84ef6d0ff0819890c0fd9d49fa43b43f'
+            test "$(sha256 -q "$driver")" = '8cdbed50abc5bc1620a2add7c6978af9cf58f2fd85dddab8d15939e53f5148b5'
             sh "$driver" /tmp/openclaw-ports-export
       - name: Transfer only the three bounded proof files
         shell: python
