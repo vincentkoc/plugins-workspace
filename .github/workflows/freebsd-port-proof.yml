@@ -33,7 +33,7 @@ jobs:
             cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
             FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
             REPO
-            pkg install -y node24 npm-node24 jq
+            pkg install -y node24 npm-node24 jq ca_root_nss
           run: |
             set -eu
             driver=$(mktemp /tmp/freebsd-helper-proof.XXXXXX)
