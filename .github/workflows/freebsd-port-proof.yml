@@ -1,0 +1,148 @@
+# Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+
+name: Temporary FreeBSD port account proof
+
+on:
+  push:
+    branches: [proof/freebsd-fixes]
+    paths: [.github/workflows/freebsd-port-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  account:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify the packaged account contract
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: x86_64
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+            pkg install -y node24
+          run: |
+            # Reviewed script SHA-256: 3f06bbe152e0400fbb93e569014533b55b76fd097f3c4ee429488d2e683d506b
+            #!/bin/sh
+            # Disposable FreeBSD-only proof of the packaged rc.d account/HOME contract.
+            set -eu
+            [ "$(uname -s)" = FreeBSD ]
+            [ "$(id -u)" = 0 ]
+            node=$(command -v node)
+            work=$(mktemp -d /tmp/openclaw-port-account.XXXXXX)
+            account="ocport$$"
+            if pw usershow "$account" >/dev/null 2>&1; then
+              echo "test account already exists" >&2
+              exit 1
+            fi
+            created_user=no
+            running=no
+            fixture_pid=
+            cleanup() {
+              result=$?
+              if [ -z "$fixture_pid" ] && [ -s "$work/service.pid" ]; then
+                read -r fixture_pid < "$work/service.pid"
+                case "$fixture_pid" in ''|*[!0-9]*) fixture_pid= ;; esac
+              fi
+              if [ "$running" = yes ]; then
+                env openclaw_enable=YES openclaw_user="$running_user" \
+                  openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
+                  timeout 30 /bin/sh "$work/openclaw" stop || result=1
+              fi
+              if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
+                # The recorded PID is ours only while its command still names this fixture.
+                case "$(ps -p "$fixture_pid" -o command=)" in
+                  *"$work/probe.mjs"*) kill -KILL "$fixture_pid"; result=1 ;;
+                  *) echo "fixture PID identity changed; retained test state" >&2; exit 1 ;;
+                esac
+              fi
+              if [ "$created_user" = yes ]; then pw userdel "$account" || result=1; fi
+              rm -rf "$work"
+              exit "$result"
+            }
+            trap cleanup EXIT
+            trap 'exit 1' HUP INT TERM
+            chmod 755 "$work"
+            mkdir -p "$work/prefix/bin"
+            ln -s "$node" "$work/prefix/bin/node"
+            fetch -q -o "$work/openclaw.in" \
+              https://raw.githubusercontent.com/vincentkoc/freebsd-ports/50ad551015018f7a83a7440f8269280539ac5c37/misc/openclaw/files/openclaw.in
+            [ "$(sha256 -q "$work/openclaw.in")" = 93a9184f15ffd3b052b87a1e8ff10621905dc7ca21ee6fa25b2a78f01c97b835 ]
+            sed "s|%%PREFIX%%|$work/prefix|g" "$work/openclaw.in" > "$work/openclaw"
+            cat > "$work/probe.mjs" <<'JS'
+            import fs from 'node:fs';
+            import os from 'node:os';
+            fs.writeFileSync(process.env.PROBE_RECORD, JSON.stringify({
+              uid: process.getuid(), home: os.homedir(), envHome: process.env.HOME,
+              args: process.argv.slice(2), pid: process.pid,
+            }));
+            process.on('SIGTERM', () => process.exit(0));
+            setInterval(() => {}, 1000);
+            JS
+            printf '#!/bin/sh\nexec "%s/prefix/bin/node" "%s/probe.mjs" "$@"\n' "$work" "$work" > "$work/prefix/bin/openclaw"
+            chmod 755 "$work/prefix/bin/openclaw"
+            pw useradd "$account" -d "$work/account-home" -m -s /bin/sh
+            created_user=yes
+            run_case() {
+              running_user=$1
+              record=$2
+              expected_uid=$3
+              expected_home=$4
+              running=yes
+              env openclaw_enable=YES openclaw_user="$running_user" \
+                openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
+                PROBE_RECORD="$record" timeout 30 /bin/sh "$work/openclaw" start
+              attempts=0
+              while [ ! -s "$record" ]; do
+                attempts=$((attempts + 1))
+                [ "$attempts" -le 30 ] || { cat "$work/service.log"; exit 1; }
+                sleep 1
+              done
+              fixture_pid=$("$node" -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).pid' "$record")
+              case "$fixture_pid" in ''|*[!0-9]*) echo "invalid fixture PID" >&2; exit 1;; esac
+              kill -0 "$fixture_pid"
+              "$node" - "$record" "$expected_uid" "$expected_home" <<'JS'
+            const fs = require('node:fs');
+            const assert = require('node:assert/strict');
+            const r = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+            assert.equal(r.uid, Number(process.argv[3]));
+            assert.equal(r.home, process.argv[4]);
+            assert.equal(r.envHome, process.argv[4]);
+            assert.deepEqual(r.args, ['gateway', 'run']);
+            console.log(`PASS rc.d account UID=${r.uid}, HOME/config account matches`);
+            JS
+              env openclaw_enable=YES openclaw_user="$running_user" \
+                openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
+                timeout 30 /bin/sh "$work/openclaw" stop
+              attempts=0
+              while kill -0 "$fixture_pid" 2>/dev/null; do
+                attempts=$((attempts + 1))
+                [ "$attempts" -le 10 ] || { echo "fixture process survived stop" >&2; exit 1; }
+                sleep 1
+              done
+              running=no
+              fixture_pid=
+              attempts=0
+              while [ -e "$work/service.pid" ]; do
+                attempts=$((attempts + 1))
+                [ "$attempts" -le 10 ] || { echo "daemon did not remove its PID file" >&2; exit 1; }
+                sleep 1
+              done
+            }
+            root_home=$(pw usershow root -7 | cut -d: -f6)
+            run_case root "$work/default.json" 0 "$root_home"
+            run_case "$account" "$work/account-home/account.json" "$(id -u "$account")" "$work/account-home"
+            echo 'PASS existing rc.d honors the documented non-root account and home; no real gateway or upgrade claim'
