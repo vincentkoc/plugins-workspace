@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-License-Identifier: MIT
 
-name: Temporary FreeBSD port account proof
+name: Temporary FreeBSD port proofs
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
             REPO
             pkg install -y node24
           run: |
-            # Reviewed script SHA-256: 3f06bbe152e0400fbb93e569014533b55b76fd097f3c4ee429488d2e683d506b
+            # Reviewed script SHA-256: b91ccb266c73ac8d5be43f723cdc193a3d50694c8f35e4e86805f40eac707bd0
             #!/bin/sh
             # Disposable FreeBSD-only proof of the packaged rc.d account/HOME contract.
             set -eu
@@ -60,7 +60,7 @@ jobs:
               if [ "$running" = yes ]; then
                 env openclaw_enable=YES openclaw_user="$running_user" \
                   openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
-                  timeout 30 /bin/sh "$work/openclaw" stop || result=1
+                  timeout --foreground 30 /bin/sh "$work/openclaw" stop || result=1
               fi
               if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
                 # The recorded PID is ours only while its command still names this fixture.
@@ -94,6 +94,15 @@ jobs:
             JS
             printf '#!/bin/sh\nexec "%s/prefix/bin/node" "%s/probe.mjs" "$@"\n' "$work" "$work" > "$work/prefix/bin/openclaw"
             chmod 755 "$work/prefix/bin/openclaw"
+            # Validate the executable fixture before attributing a daemon startup failure.
+            "$node" --version
+            "$node" --check "$work/probe.mjs"
+            /bin/sh -n "$work/prefix/bin/openclaw"
+            preflight_rc=0
+            PROBE_RECORD="$work/preflight.json" timeout 2 "$work/prefix/bin/openclaw" gateway run || preflight_rc=$?
+            [ "$preflight_rc" -eq 124 ]
+            [ -s "$work/preflight.json" ]
+            echo 'PASS executable Node fixture preflight'
             pw useradd "$account" -d "$work/account-home" -m -s /bin/sh
             created_user=yes
             run_case() {
@@ -101,14 +110,21 @@ jobs:
               record=$2
               expected_uid=$3
               expected_home=$4
+              # FreeBSD timeout otherwise reaps the detached daemon and waits for it.
               running=yes
               env openclaw_enable=YES openclaw_user="$running_user" \
                 openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
-                PROBE_RECORD="$record" timeout 30 /bin/sh "$work/openclaw" start
+                PROBE_RECORD="$record" timeout --foreground 30 /bin/sh -x "$work/openclaw" start > "$work/start-trace.log" 2>&1
               attempts=0
               while [ ! -s "$record" ]; do
                 attempts=$((attempts + 1))
-                [ "$attempts" -le 30 ] || { cat "$work/service.log"; exit 1; }
+                [ "$attempts" -le 30 ] || {
+                  echo 'fixture missing; rc.d startup trace and daemon log follow' >&2
+                  tail -100 "$work/start-trace.log"
+                  cat "$work/service.log"
+                  ls -l "$work/prefix/bin" "$work/service.log" "$work/service.pid" 2>/dev/null || true
+                  exit 1
+                }
                 sleep 1
               done
               fixture_pid=$("$node" -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).pid' "$record")
@@ -126,7 +142,7 @@ jobs:
             JS
               env openclaw_enable=YES openclaw_user="$running_user" \
                 openclaw_log="$work/service.log" openclaw_pidfile="$work/service.pid" \
-                timeout 30 /bin/sh "$work/openclaw" stop
+                timeout --foreground 30 /bin/sh "$work/openclaw" stop
               attempts=0
               while kill -0 "$fixture_pid" 2>/dev/null; do
                 attempts=$((attempts + 1))
@@ -146,3 +162,116 @@ jobs:
             run_case root "$work/default.json" 0 "$root_home"
             run_case "$account" "$work/account-home/account.json" "$(id -u "$account")" "$work/account-home"
             echo 'PASS existing rc.d honors the documented non-root account and home; no real gateway or upgrade claim'
+
+  private-layout:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Verify native private package ownership
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: x86_64
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+            pkg install -y node24 npm-node24 git python3 gmake
+          run: |
+            # Reviewed script SHA-256: a0124227c398c888aeb3ae4a973f38d5b02d23537534e1349d9f0ec61b09e075
+            #!/bin/sh
+            # Disposable FreeBSD proof for the package-owned private runtime layout.
+            set -eu
+            [ "$(uname -s)" = FreeBSD ]
+            [ "$(id -u)" = 0 ]
+            command -v node
+            command -v npm
+            command -v python3
+            command -v gmake
+            [ -z "${OPENCLAW_SUPERVISOR_MODE-}" ]
+            [ -z "${OPENCLAW_HOME-}${OPENCLAW_STATE_DIR-}${OPENCLAW_CONFIG_PATH-}${OPENCLAW_PROFILE-}" ]
+            work=$(mktemp -d /tmp/openclaw-private-layout.XXXXXX)
+            # Retain this task-only directory on failure for the CI artifact/diagnostic owner.
+            cleanup() {
+              result=$?
+              if [ "$result" -eq 0 ]; then rm -rf "$work"; else echo "retained failed proof: $work" >&2; fi
+              exit "$result"
+            }
+            trap cleanup EXIT
+            trap 'exit 1' HUP INT TERM
+            mkdir -p "$work/staging" "$work/prefix/bin" "$work/prefix/libexec" "$work/home/.openclaw"
+            fetch -q -o "$work/openclaw.tgz" https://registry.npmjs.org/openclaw/-/openclaw-2026.9.4.tgz
+            node - "$work/openclaw.tgz" <<'JS'
+            const fs = require('node:fs');
+            const crypto = require('node:crypto');
+            const assert = require('node:assert/strict');
+            const expected = 'lTQpEEe1Xm3u2PCHaPEr+vP8paGk1vLdHuzdItsNToaLI6hAqRVvgJYg+GxukJhETJp4tPy/S1Gftl4KuB8n7A==';
+            assert.equal(crypto.createHash('sha512').update(fs.readFileSync(process.argv[2])).digest('base64'), expected);
+            const [major, minor] = process.versions.node.split('.').map(Number);
+            assert.ok((major === 24 && minor >= 16) || major > 26 || (major === 26 && minor >= 1));
+            console.log('PASS published openclaw@2026.9.4 tarball integrity');
+            JS
+            # This is ordinary native npm installation; scripts and optional dependencies run.
+            env HOME="$work/home" npm install --prefix "$work/staging" --install-strategy=nested \
+              --omit=dev --no-audit --no-fund "$work/openclaw.tgz"
+            [ -d "$work/staging/node_modules/openclaw" ]
+            mv "$work/staging/node_modules/openclaw" "$work/prefix/libexec/openclaw"
+            runtime="$work/prefix/libexec/openclaw"
+            [ ! -e "$work/staging/node_modules/openclaw" ]
+            printf '#!/bin/sh\nexec "%s" "%s/openclaw.mjs" "$@"\n' "$(command -v node)" "$runtime" > "$work/prefix/bin/openclaw"
+            chmod 755 "$work/prefix/bin/openclaw"
+            printf '{"gateway":{"mode":"local"}}\n' > "$work/home/.openclaw/openclaw.json"
+            cat > "$work/fingerprint.cjs" <<'JS'
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const hash = crypto.createHash('sha256');
+            const root = process.argv[2];
+            function visit(rel) {
+              const abs = path.join(root, rel);
+              const st = fs.lstatSync(abs);
+              hash.update(JSON.stringify([rel, st.mode]));
+              if (st.isSymbolicLink()) hash.update(fs.readlinkSync(abs));
+              else if (st.isDirectory()) for (const name of fs.readdirSync(abs).sort()) visit(path.join(rel, name));
+              else if (st.isFile()) hash.update(fs.readFileSync(abs));
+            }
+            visit('');
+            console.log(hash.digest('hex'));
+            JS
+            config="$work/home/.openclaw/openclaw.json"
+            package_before=$(node "$work/fingerprint.cjs" "$runtime")
+            config_before=$(sha256 -q "$config")
+            env HOME="$work/home" PATH="$work/prefix/bin:$PATH" \
+              timeout 60 "$work/prefix/bin/openclaw" --version
+            [ "$(node -p "require('$runtime/package.json').version")" = 2026.9.4 ]
+            [ "$(node "$work/fingerprint.cjs" "$runtime")" = "$package_before" ]
+            [ "$(sha256 -q "$config")" = "$config_before" ]
+            # A private package root must never be recognized as an npm global installation.
+            global_root=$(env HOME="$work/home" npm root --global)
+            [ "$global_root/openclaw" != "$runtime" ]
+            run_refusal() {
+              label=$1
+              shift
+              rc=0
+              env HOME="$work/home" PATH="$work/prefix/bin:$PATH" \
+                timeout 120 "$work/prefix/bin/openclaw" update --yes --json "$@" \
+                > "$work/$label.log" 2>&1 || rc=$?
+              [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || { cat "$work/$label.log"; exit 1; }
+              grep -F 'Update refused: package manager owner is unknown; no changes were made.' "$work/$label.log"
+              [ "$(node "$work/fingerprint.cjs" "$runtime")" = "$package_before" ]
+              [ "$(sha256 -q "$config")" = "$config_before" ]
+              [ ! -e "$work/staging/node_modules/openclaw" ]
+              echo "PASS $label update refused with package and configuration unchanged"
+            }
+            run_refusal default
+            run_refusal stable --channel stable
+            run_refusal beta --channel beta
+            run_refusal tag --tag 2026.9.4
+            echo 'PASS native private-layout package update refusal; no rc.d, pkg upgrade, or dev-channel claim'
