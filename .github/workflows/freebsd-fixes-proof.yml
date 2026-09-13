@@ -26,11 +26,13 @@ jobs:
       matrix:
         include:
           - package: tauri-plugin-updater
-            source: 0574ea4cdf3ad921cf0c6d61946af5a0cb8f9339
+            source: ed9f8d7ef38c58f2ec3dffe4c6431300ce4ea15f
             args: --lib --test bsd
+            extra-packages: ''
           - package: tauri-plugin-deep-link
-            source: 0302d0d2f721a74403fcbf350bbf107852371d8b
+            source: 3d745d015220fefeb9152841095afb4799db5e3d
             args: --all-targets
+            extra-packages: xdg-utils desktop-file-utils
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -53,7 +55,7 @@ jobs:
             cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
             FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
             REPO
-            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 dbus
+            pkg install -y rust git pkgconf gtk3 webkit2-gtk_41 dbus ${{ matrix.extra-packages }}
           run: |
             set -eu
             test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = '${{ matrix.source }}'
@@ -62,3 +64,6 @@ jobs:
             cargo --version
             pkg-config --modversion gtk+-3.0 webkit2gtk-4.1
             cargo test --locked --package '${{ matrix.package }}' ${{ matrix.args }}
+            if [ '${{ matrix.package }}' = tauri-plugin-deep-link ]; then
+              timeout -k 5s 90s cargo test --locked --package tauri-plugin-deep-link --test xdg -- --ignored --exact xdg_registration --nocapture
+            fi
