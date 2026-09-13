@@ -91,7 +91,13 @@ jobs:
               proof "$fixture/candidate.sh" "$fixture/prefix"
             env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
               "$fixture/prefix/bin/openclaw" --version
-            echo "FreeBSD installer proof passed: $candidate"
+            # Repeat the complete installer with the active runtime alias first on PATH.
+            env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
+              PATH="$fixture/prefix/tools/node/bin:$PATH" \
+              bash "$fixture/candidate.sh" --json --no-onboard --prefix "$fixture/prefix" --version 2026.9.4
+            env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
+              "$fixture/prefix/bin/openclaw" --version
+            echo "FreeBSD full repeat-install proof passed: $candidate"
             PROOF_SCRIPT
-            test "$(sha256 -q "$driver")" = '01e0ca5ea0cf78c67cf1d831f02e0ddc198565109787246a3828d865c69cd771'
+            test "$(sha256 -q "$driver")" = '2b9989f7ab1f4a6da6bdabe239a46e25e8cfdf86ea5d6a252845ec78b8b6ab79'
             timeout -k 15s 1200s sh "$driver"
