@@ -52,11 +52,11 @@ jobs:
             trap 'exit 143' TERM
             mkdir -p "$fixture/home" "$fixture/state"
             base=a0cce74d389d737d6dcf21de7344af10cf862f72
-            candidate=24480988b8a0dbed8938a2da65ff3f56e1012d4b
+            candidate=8fd304ae1042ee082e4c6f73e0318622cbba63fe
             fetch -qo "$fixture/base.sh" "https://raw.githubusercontent.com/openclaw/openclaw/$base/scripts/install-cli.sh"
             fetch -qo "$fixture/candidate.sh" "https://raw.githubusercontent.com/openclaw/openclaw/$candidate/scripts/install-cli.sh"
             [ "$(sha256 -q "$fixture/base.sh")" = 20cf05f4657ce455d504ff03a1f655910055f0411607e6f589c121cae06e646d ]
-            [ "$(sha256 -q "$fixture/candidate.sh")" = 3ab70f44d0c40f9a78559948865b1487d8fb15d6ab0a4afce4ca96c5160e538a ]
+            [ "$(sha256 -q "$fixture/candidate.sh")" = 23baf65d42facc465c79439e8ee8b794adeca252ff0f648e2e5271c43c2da753 ]
             if env HOME="$fixture/home" OPENCLAW_INSTALL_CLI_SH_NO_RUN=1 bash --noprofile --norc -c 'source "$1"; os_detect' proof "$fixture/base.sh" > "$fixture/base.log" 2>&1; then
               echo 'Parent unexpectedly accepted FreeBSD.' >&2
               exit 1
@@ -99,5 +99,5 @@ jobs:
               "$fixture/prefix/bin/openclaw" --version
             echo "FreeBSD full repeat-install proof passed: $candidate"
             PROOF_SCRIPT
-            test "$(sha256 -q "$driver")" = '2b9989f7ab1f4a6da6bdabe239a46e25e8cfdf86ea5d6a252845ec78b8b6ab79'
+            test "$(sha256 -q "$driver")" = '4f5ad508c7e4409ec9b4838f22ccffc10f4fb7eee00628dfa9b82994fe32d38c'
             timeout -k 15s 1200s sh "$driver"
