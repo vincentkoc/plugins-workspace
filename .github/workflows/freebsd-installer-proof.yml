@@ -1,0 +1,97 @@
+# Copyright 2019-2026 Tauri Programme within The Commons Conservancy
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+
+name: Temporary FreeBSD installer proof
+
+on:
+  push:
+    branches: [proof/freebsd-fixes]
+    paths: [.github/workflows/freebsd-installer-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    if: github.repository == 'vincentkoc/plugins-workspace'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Verify native installer and runtime aliases
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          release: '15.1'
+          arch: x86_64
+          mem: 6144
+          sync: rsync
+          copyback: false
+          disable-cache: true
+          debug-on-error: false
+          prepare: |
+            set -eu
+            mkdir -p /usr/local/etc/pkg/repos
+            cat > /usr/local/etc/pkg/repos/FreeBSD.conf <<'REPO'
+            FreeBSD-ports: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }
+            REPO
+          run: |
+            set -eu
+            driver=$(mktemp /tmp/openclaw-installer-driver.XXXXXX)
+            trap 'rm -f "$driver"' EXIT
+            trap 'exit 1' HUP INT TERM
+            cat > "$driver" <<'PROOF_SCRIPT'
+            #!/bin/sh
+            set -eu
+            [ "$(uname -s)" = FreeBSD ] || { echo 'This proof requires a disposable FreeBSD VM.' >&2; exit 1; }
+            # The caller owns this disposable VM; never run on a production FreeBSD host.
+            pkg install -y bash node24 npm-node24 git python3 gmake
+            fixture=$(mktemp -d /tmp/openclaw-installer-proof.XXXXXX)
+            trap 'rm -rf "$fixture"' EXIT
+            trap 'exit 129' HUP
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            mkdir -p "$fixture/home" "$fixture/state"
+            base=a0cce74d389d737d6dcf21de7344af10cf862f72
+            candidate=24480988b8a0dbed8938a2da65ff3f56e1012d4b
+            fetch -qo "$fixture/base.sh" "https://raw.githubusercontent.com/openclaw/openclaw/$base/scripts/install-cli.sh"
+            fetch -qo "$fixture/candidate.sh" "https://raw.githubusercontent.com/openclaw/openclaw/$candidate/scripts/install-cli.sh"
+            [ "$(sha256 -q "$fixture/base.sh")" = 20cf05f4657ce455d504ff03a1f655910055f0411607e6f589c121cae06e646d ]
+            [ "$(sha256 -q "$fixture/candidate.sh")" = 3ab70f44d0c40f9a78559948865b1487d8fb15d6ab0a4afce4ca96c5160e538a ]
+            if env HOME="$fixture/home" OPENCLAW_INSTALL_CLI_SH_NO_RUN=1 bash --noprofile --norc -c 'source "$1"; os_detect' proof "$fixture/base.sh" > "$fixture/base.log" 2>&1; then
+              echo 'Parent unexpectedly accepted FreeBSD.' >&2
+              exit 1
+            fi
+            grep -F 'Unsupported OS: FreeBSD' "$fixture/base.log"
+            echo "parent rejection verified: $base"
+            env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
+              bash "$fixture/candidate.sh" --json --no-onboard --prefix "$fixture/prefix" --version 2026.9.4
+            runtime="$fixture/prefix/tools/node/bin/node"
+            env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
+              "$fixture/prefix/bin/openclaw" --version
+            "$runtime" - "$fixture/prefix/tools/node/lib/node_modules/openclaw/package.json" <<'NODE'
+            const assert = require('node:assert/strict');
+            const fs = require('node:fs');
+            const { DatabaseSync } = require('node:sqlite');
+            assert.equal(process.platform, 'freebsd');
+            assert.equal(JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).version, '2026.9.4');
+            const db = new DatabaseSync(':memory:');
+            try {
+              const text = 'a\u0000b\u0000';
+              db.exec('CREATE TABLE probe (value TEXT)');
+              db.prepare('INSERT INTO probe VALUES (?)').run(text);
+              assert.equal(db.prepare('SELECT value FROM probe').get().value, text);
+              console.log(JSON.stringify({ platform: process.platform, node: process.version,
+                sqlite: db.prepare('SELECT sqlite_version() AS version').get().version,
+                installed: '2026.9.4', nulRoundTrip: true }));
+            } finally { db.close(); }
+            NODE
+            # Reuse through the installer's existing alias must not make circular links.
+            env HOME="$fixture/home" OPENCLAW_INSTALL_CLI_SH_NO_RUN=1 \
+              bash --noprofile --norc -c 'source "$1"; PREFIX="$2"; PATH="$PREFIX/tools/node/bin:$PATH"; export PATH; install_node "$(os_detect)" "$(arch_detect)"' \
+              proof "$fixture/candidate.sh" "$fixture/prefix"
+            env HOME="$fixture/home" OPENCLAW_HOME="$fixture/home" OPENCLAW_STATE_DIR="$fixture/state" \
+              "$fixture/prefix/bin/openclaw" --version
+            echo "FreeBSD installer proof passed: $candidate"
+            PROOF_SCRIPT
+            test "$(sha256 -q "$driver")" = '01e0ca5ea0cf78c67cf1d831f02e0ddc198565109787246a3828d865c69cd771'
+            timeout -k 15s 1200s sh "$driver"
