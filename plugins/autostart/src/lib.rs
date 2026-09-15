@@ -222,6 +222,10 @@ impl Builder {
                     builder.set_app_path(&current_exe.display().to_string());
                 }
 
+                // FreeBSD has no AppImage environment; autostart uses the executable.
+                #[cfg(target_os = "freebsd")]
+                builder.set_app_path(&current_exe.display().to_string());
+
                 app.manage(AutoLaunchManager(
                     builder.build().map_err(|e| e.to_string())?,
                 ));
