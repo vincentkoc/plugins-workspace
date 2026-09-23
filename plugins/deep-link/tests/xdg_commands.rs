@@ -57,6 +57,7 @@ fn xdg_command_results() {
         "register-failure",
         "query-failure",
         "unregister-failure",
+        "unregister-missing-refresh",
     ] {
         let home = sandbox.0.join(mode);
         fs::create_dir(&home).unwrap();
@@ -71,6 +72,9 @@ fn xdg_command_results() {
             fs::create_dir(home.join(directory)).unwrap();
         }
         for command in ["update-desktop-database", "xdg-mime"] {
+            if mode == "unregister-missing-refresh" && command == "update-desktop-database" {
+                continue;
+            }
             let path = home.join("bin").join(command);
             fs::write(
                 &path,
@@ -147,10 +151,49 @@ fn exercise_commands(mode: &str) {
     if mode != "real" {
         let error = if mode == "query-failure" {
             deep_link.is_registered(scheme).unwrap_err()
-        } else if mode == "unregister-failure" {
-            // Registration leaves its desktop file when the cache update fails.
-            assert!(matches!(deep_link.register(scheme), Err(Error::Io(_))));
-            deep_link.unregister(scheme).unwrap_err()
+        } else if matches!(mode, "unregister-failure" | "unregister-missing-refresh") {
+            let file_name = desktop_file_name();
+            let applications =
+                PathBuf::from(env::var_os("XDG_DATA_HOME").unwrap()).join("applications");
+            fs::create_dir(&applications).unwrap();
+            let desktop_path = applications.join(&file_name);
+            fs::write(
+                &desktop_path,
+                format!("[Desktop Entry]\nExec=\"/test app\" %u\nMimeType=x-scheme-handler/{scheme};x-scheme-handler/other;\n"),
+            )
+            .unwrap();
+            let mimeapps_path =
+                PathBuf::from(env::var_os("XDG_CONFIG_HOME").unwrap()).join("mimeapps.list");
+            fs::write(
+                &mimeapps_path,
+                format!("[Default Applications]\nx-scheme-handler/{scheme}={file_name};other.desktop;\n[Added Associations]\nx-scheme-handler/{scheme}=other.desktop;{file_name};\n"),
+            )
+            .unwrap();
+            let result = deep_link.unregister(scheme);
+            // Refresh failure happens after both authoritative files have been updated.
+            let mimeapps = ini::Ini::load_from_file(mimeapps_path).unwrap();
+            for group in ["Default Applications", "Added Associations"] {
+                assert_eq!(
+                    mimeapps
+                        .section(Some(group))
+                        .unwrap()
+                        .get(&format!("x-scheme-handler/{scheme}")),
+                    Some("other.desktop;")
+                );
+            }
+            let desktop = fs::read_to_string(desktop_path).unwrap();
+            assert!(desktop.lines().any(|line| line == "Exec=\"/test app\" %u"));
+            assert!(desktop
+                .lines()
+                .any(|line| line == "MimeType=x-scheme-handler/other;"));
+            if mode == "unregister-missing-refresh" {
+                result.unwrap();
+                assert!(!PathBuf::from(env::var_os("HOME").unwrap())
+                    .join("calls")
+                    .exists());
+                return;
+            }
+            result.unwrap_err()
         } else {
             deep_link.register(scheme).unwrap_err()
         };
@@ -171,7 +214,7 @@ fn exercise_commands(mode: &str) {
             "update-failure" => vec!["update-desktop-database"],
             "register-failure" => vec!["update-desktop-database", "xdg-mime"],
             "query-failure" => vec!["xdg-mime"],
-            "unregister-failure" => vec!["update-desktop-database", "update-desktop-database"],
+            "unregister-failure" => vec!["update-desktop-database"],
             _ => unreachable!(),
         };
         assert_eq!(calls.lines().collect::<Vec<_>>(), expected);
