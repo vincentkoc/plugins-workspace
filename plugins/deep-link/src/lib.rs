@@ -363,6 +363,9 @@ mod imp {
                 Command::new("update-desktop-database")
                     .arg(target)
                     .status()
+                    .and_then(|status| {
+                        crate::error::check_command_status("update-desktop-database", status)
+                    })
                     .inspect_err(crate::error::inspect_command_error(
                         "update-desktop-database",
                     ))?;
@@ -370,6 +373,7 @@ mod imp {
                 Command::new("xdg-mime")
                     .args(["default", &file_name, mime_type.as_str()])
                     .status()
+                    .and_then(|status| crate::error::check_command_status("xdg-mime", status))
                     .inspect_err(crate::error::inspect_command_error("xdg-mime"))?;
 
                 Ok(())
@@ -413,52 +417,90 @@ mod imp {
                         .to_string_lossy()
                 );
                 let mime_type = format!("x-scheme-handler/{}", _protocol.as_ref());
-
-                // stop being the default handler
-                let mimeapps_path = self.app.path().config_dir()?.join("mimeapps.list");
-                if mimeapps_path.exists() {
-                    let mut mimeapps = ini::Ini::load_from_file(&mimeapps_path)?;
-                    if let Some(section) = mimeapps.section_mut(Some("Default Applications")) {
-                        if section.get(&mime_type).unwrap_or_default() == file_name {
-                            section.remove(&mime_type);
+                let remove_entry = |section: &mut ini::Properties, key: &str, item: &str| {
+                    let Some(value) = section.get(key) else {
+                        return false;
+                    };
+                    let mut removed = false;
+                    let remaining = value
+                        .split(';')
+                        .filter(|entry| {
+                            if *entry == item {
+                                removed = true;
+                                false
+                            } else {
+                                !entry.is_empty()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    if removed {
+                        if remaining.is_empty() {
+                            section.remove(key);
+                        } else {
+                            section.insert(key.to_string(), format!("{remaining};"));
                         }
                     }
-                    mimeapps.write_to_file(&mimeapps_path)?;
+                    removed
+                };
+                // Values are already desktop-file syntax. Preserve Exec quotes and escapes
+                // while removing only this app's scheme associations.
+                let load_ini = |path: &std::path::Path| {
+                    ini::Ini::load_from_file_opt(
+                        path,
+                        ini::ParseOption {
+                            enabled_quote: false,
+                            enabled_escape: false,
+                        },
+                    )
+                };
+                // Stop being the default handler without removing other applications.
+                let mimeapps_path = self.app.path().config_dir()?.join("mimeapps.list");
+                match load_ini(&mimeapps_path) {
+                    Ok(mut mimeapps) => {
+                        let mut changed = false;
+                        for group in ["Default Applications", "Added Associations"] {
+                            if let Some(section) = mimeapps.section_mut(Some(group)) {
+                                changed |= remove_entry(section, &mime_type, &file_name);
+                            }
+                        }
+                        if changed {
+                            mimeapps
+                                .write_to_file_policy(mimeapps_path, ini::EscapePolicy::Nothing)?;
+                        }
+                    }
+                    Err(ini::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
                 }
 
-                // Stop declaring the scheme in the handler's `.desktop` file too: the desktop
-                // database indexes it, and with no default set `xdg-mime` falls back to that
-                // index, so the app would otherwise still be the handler.
-                let applications = self.app.path().data_dir()?.join("applications");
-                let desktop_file_path = applications.join(&file_name);
-                // Only the `MimeType` key is touched: the file may carry other changes.
-                if let Ok(mut desktop_file) = ini::Ini::load_from_file(&desktop_file_path) {
-                    if let Some(section) = desktop_file.section_mut(Some("Desktop Entry")) {
-                        let mime_types = section
-                            .get("MimeType")
-                            .unwrap_or_default()
-                            .split(';')
-                            .filter(|mime| !mime.is_empty() && *mime != mime_type)
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>();
-                        if mime_types.is_empty() {
-                            section.remove("MimeType");
-                        } else {
-                            section.insert("MimeType", mime_types.join(";"));
+                // Remove this scheme from the desktop index source while preserving other keys.
+                let target = self.app.path().data_dir()?.join("applications");
+                let desktop_path = target.join(&file_name);
+                match load_ini(&desktop_path) {
+                    Ok(mut desktop) => {
+                        if let Some(section) = desktop.section_mut(Some("Desktop Entry")) {
+                            if remove_entry(section, "MimeType", &mime_type) {
+                                desktop.write_to_file_policy(
+                                    &desktop_path,
+                                    ini::EscapePolicy::Nothing,
+                                )?;
+                            }
                         }
                     }
-                    desktop_file.write_to_file(&desktop_file_path)?;
+                    Err(ini::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
 
-                    // Without the refreshed index `xdg-mime` may keep reporting the app as the
-                    // handler, but the scheme is unregistered as far as the app can tell, so a
-                    // missing command is not an error.
-                    if let Err(e) = Command::new("update-desktop-database")
-                        .arg(&applications)
-                        .status()
-                    {
-                        tracing::warn!(
+                // Without the refreshed index, the app may still be reported as the handler.
+                // Preserve the optional command contract even after a desktop file was removed.
+                if target.try_exists()? {
+                    match Command::new("update-desktop-database").arg(&target).status() {
+                        Ok(status) => {
+                            crate::error::check_command_status("update-desktop-database", status)?;
+                        }
+                        Err(e) => tracing::warn!(
                             "Failed to run OS command `update-desktop-database`, the desktop database may still list the app as the `{mime_type}` handler: {e}"
-                        );
+                        ),
                     }
                 }
 
@@ -513,7 +555,8 @@ mod imp {
                     .output()
                     .inspect_err(crate::error::inspect_command_error("xdg-mime"))?;
 
-                Ok(String::from_utf8_lossy(&output.stdout).contains(&file_name))
+                crate::error::check_command_status("xdg-mime", output.status)?;
+                Ok(String::from_utf8_lossy(&output.stdout).trim_end_matches('\n') == file_name)
             }
 
             #[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
