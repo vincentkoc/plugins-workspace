@@ -71,7 +71,7 @@ jobs:
               ;;
             updater)
               run_test custom_target_checks_metadata_without_installing cargo test --locked -p tauri-plugin-updater --test bsd
-              run_test verifies_cached_bytes_and_rejects_tampering cargo test --locked -p tauri-plugin-updater --lib verifies_cached_bytes_and_rejects_tampering
+              run_test restores_release_metadata_with_runtime_context cargo test --locked -p tauri-plugin-updater --lib offline_tests::
               ;;
             resource-dir)
               expected=resolve_resource_dir
